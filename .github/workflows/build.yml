@@ -35,21 +35,20 @@ jobs:
           WHISPER_SHA: 5670d5c0bbcb148feabef84400a07cfca9aa3b30
         run: |
           set -euo pipefail
-
-          # Reproducibility pin only; compatibility with VoiceInk v2.20 is NOT proven
-          # until compilation and runtime testing have been performed.
-          perl -0pi -e \
-            's{git clone https://github\.com/ggerganov/whisper\.cpp\.git \$\(WHISPER_CPP_DIR\);}{git clone https://github.com/ggerganov/whisper.cpp.git $(WHISPER_CPP_DIR) \&\& (cd $(WHISPER_CPP_DIR) \&\& git checkout --detach $ENV{WHISPER_SHA});}g;
-             s{\(cd \$\(WHISPER_CPP_DIR\) \&\& git pull\);}{(cd $(WHISPER_CPP_DIR) \&\& git fetch --depth 1 origin $ENV{WHISPER_SHA} \&\& git checkout --detach $ENV{WHISPER_SHA});}g' \
-            Makefile
-
-          grep -Fq "${WHISPER_SHA}" Makefile
-          ! grep -Eq 'git[[:space:]]+pull|git[[:space:]]+reset[[:space:]]+--hard[[:space:]]+(HEAD|origin/HEAD)' Makefile
-          grep -Fq 'git checkout --detach' Makefile
-
           test -f BUILDING.md
           test -f LocalBuild.xcconfig
-          test -f VoiceInk.local.entitlements
+          test -f VoiceInk/VoiceInk.local.entitlements
+          xcodebuild -version
+
+          # Pre-build whisper.xcframework at a pinned commit (one day before the v2.20 release)
+          # in the exact location the upstream Makefile expects; `make local` then skips its
+          # own unpinned clone/pull. The upstream Makefile is not modified.
+          DEPS="$HOME/VoiceInk-Dependencies"
+          mkdir -p "$DEPS"
+          git clone --filter=blob:none https://github.com/ggerganov/whisper.cpp.git "$DEPS/whisper.cpp"
+          git -C "$DEPS/whisper.cpp" checkout --detach "$WHISPER_SHA"
+          (cd "$DEPS/whisper.cpp" && ./build-xcframework.sh)
+          test -d "$DEPS/whisper.cpp/build-apple/whisper.xcframework"
 
           make local LOCAL_CODESIGN_IDENTITY=-
 
