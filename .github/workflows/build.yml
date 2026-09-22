@@ -1,0 +1,147 @@
+name: VoiceInk v2.20 reproducible local build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Reject private repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event.repository.visibility }}" == "private" || "${{ github.event.repository.private }}" == "true" ]]; then
+            echo "Refusing to build: this workflow requires a public repository so standard macOS runner minutes are not metered."
+            exit 1
+          fi
+
+      - name: Check out official VoiceInk v2.20
+        uses: actions/checkout@v4
+        with:
+          repository: Beingpax/VoiceInk
+          ref: 173cbb2b3aa0a18ab4035aa1bc9dc9fc215e88b6
+          path: voiceink
+          fetch-depth: 1
+
+      - name: Pin whisper.cpp and build
+        working-directory: voiceink
+        shell: bash
+        env:
+          WHISPER_SHA: 5670d5c0bbcb148feabef84400a07cfca9aa3b30
+        run: |
+          set -euo pipefail
+
+          # Reproducibility pin only; compatibility with VoiceInk v2.20 is NOT proven
+          # until compilation and runtime testing have been performed.
+          perl -0pi -e \
+            's{git clone https://github\.com/ggerganov/whisper\.cpp\.git \$\(WHISPER_CPP_DIR\);}{git clone https://github.com/ggerganov/whisper.cpp.git $(WHISPER_CPP_DIR) \&\& (cd $(WHISPER_CPP_DIR) \&\& git checkout --detach $ENV{WHISPER_SHA});}g;
+             s{\(cd \$\(WHISPER_CPP_DIR\) \&\& git pull\);}{(cd $(WHISPER_CPP_DIR) \&\& git fetch --depth 1 origin $ENV{WHISPER_SHA} \&\& git checkout --detach $ENV{WHISPER_SHA});}g' \
+            Makefile
+
+          grep -Fq "${WHISPER_SHA}" Makefile
+          ! grep -Eq 'git[[:space:]]+pull|git[[:space:]]+reset[[:space:]]+--hard[[:space:]]+(HEAD|origin/HEAD)' Makefile
+          grep -Fq 'git checkout --detach' Makefile
+
+          test -f BUILDING.md
+          test -f LocalBuild.xcconfig
+          test -f VoiceInk.local.entitlements
+
+          make local LOCAL_CODESIGN_IDENTITY=-
+
+      - name: Verify arm64 output and app integrity
+        working-directory: voiceink
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$PWD/.local-build/Build/Products/Release/VoiceInk.app"
+          test -d "$APP"
+          test -f "$APP/Contents/MacOS/VoiceInk"
+
+          ARCHS="$(lipo -archs "$APP/Contents/MacOS/VoiceInk")"
+          printf '%s\n' "$ARCHS" | tr ' ' '\n' | grep -Fxq arm64
+
+          BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print:CFBundleIdentifier' "$APP/Contents/Info.plist")"
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print:CFBundleShortVersionString' "$APP/Contents/Info.plist")"
+          [[ "$BUNDLE_ID" == "com.prakashjoshipax.VoiceInk" ]]
+          [[ "$VERSION" == "2.20" ]]
+
+          ! find "$APP" -iname '*macked*' -print -quit | grep -q .
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
+          codesign -dv --verbose=4 "$APP" 2>&1 | tee /tmp/voiceink-codesign.txt
+          ! grep -Eiq 'macked|Authority=.*macked' /tmp/voiceink-codesign.txt
+
+          while IFS= read -r -d '' item; do
+            if file -b "$item" | grep -Eq 'Mach-O|shared library'; then
+              otool -l "$item" 2>/dev/null | grep -Eiq 'macked' && {
+                echo "Rejected injected macked load command in $item"
+                exit 1
+              } || true
+              codesign -dv --verbose=4 "$item" 2>/dev/null | grep -Eiq 'macked|Authority=.*macked' && {
+                echo "Rejected macked signing authority in $item"
+                exit 1
+              } || true
+            fi
+          done < <(find "$APP" -type f -print0)
+
+      - name: Package app and provenance
+        working-directory: voiceink
+        shell: bash
+        env:
+          VOICEINK_SHA: 173cbb2b3aa0a18ab4035aa1bc9dc9fc215e88b6
+          WHISPER_SHA: 5670d5c0bbcb148feabef84400a07cfca9aa3b30
+        run: |
+          set -euo pipefail
+          APP="$PWD/.local-build/Build/Products/Release/VoiceInk.app"
+          STAGE="$PWD/artifact"
+          ZIP="$STAGE/VoiceInk.app.zip"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+
+          # ditto preserves the application bundle metadata.
+          ditto -c -k --keepParent "$APP" "$ZIP"
+          (
+            cd "$STAGE"
+            shasum -a 256 VoiceInk.app.zip > SHA256SUMS
+          )
+
+          {
+            echo "VoiceInk reproducible build provenance"
+            echo "Official VoiceInk repository: https://github.com/Beingpax/VoiceInk"
+            echo "VoiceInk commit: ${VOICEINK_SHA}"
+            echo "whisper.cpp commit: ${WHISPER_SHA}"
+            echo "whisper.cpp compatibility: not proven until compilation/runtime testing"
+            echo "Runner label: ${{ runner.os }} / ${{ runner.arch }}"
+            echo "Verified app architecture: $(lipo -archs "$APP/Contents/MacOS/VoiceInk")"
+            echo "Xcode:"
+            xcodebuild -version
+            echo "LOCAL_BUILD: enabled through LocalBuild.xcconfig and make local"
+            echo "LOCAL_CODESIGN_IDENTITY: -"
+            echo "CODE_SIGN_IDENTITY: -"
+            echo "CODE_SIGN_STYLE: Manual"
+            echo "DEVELOPMENT_TEAM: empty"
+            echo "CODE_SIGNING_REQUIRED: NO"
+            echo "CODE_SIGNING_ALLOWED: YES"
+            echo "Build configuration: Release"
+            echo "Runtime status: not tested; this workflow makes no local runtime success claim"
+          } > "$STAGE/BUILD-PROVENANCE.txt"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: voiceink-2.20-${{ github.run_id }}-${{ github.run_attempt }}
+          path: voiceink/artifact
+          if-no-files-found: error
+
+# PIPELINE_READY
+# This marker means offline preparation readiness only, not a successful live build.
+# The upstream reference, required Makefile/BUILDING.md settings, and both full commit
+# SHAs are supplied. The repository must remain public and the workflow must be
+# manually dispatched; no remote action, runtime claim, signing credential, deployment,
+# or publishing operation is performed here.
+# VoiceInk is GPL-3.0 licensed; this workflow does not alter or remove upstream licensing.
