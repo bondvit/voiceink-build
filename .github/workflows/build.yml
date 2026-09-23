@@ -21,8 +21,9 @@ jobs:
           fi
 
       - name: Check out official VoiceInk v2.20
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          persist-credentials: false
           repository: Beingpax/VoiceInk
           ref: 173cbb2b3aa0a18ab4035aa1bc9dc9fc215e88b6
           path: voiceink
@@ -131,7 +132,7 @@ jobs:
           } > "$STAGE/BUILD-PROVENANCE.txt"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: voiceink-2.20-${{ github.run_id }}-${{ github.run_attempt }}
           path: voiceink/artifact
